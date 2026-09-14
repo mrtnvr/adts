@@ -1,0 +1,21 @@
+description: Ultralytics YOLO26x model trained on datasets/Argus_YOLO_v3/dataset.yaml
+author: Ultralytics
+date: '2026-09-14T10:20:00.862634+03:00'
+version: 8.4.150
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+head: Detect
+batch: 1
+imgsz:
+- 1280
+- 1280
+names:
+  0: human
+  1: vehicle
+args:
+  batch: 1
+  quantize: null
+channels: 3
+end2end: false
