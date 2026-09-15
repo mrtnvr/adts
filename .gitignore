@@ -1,2 +1,12 @@
 __pycache__/
 *.pyc
+
+# scratch/debug outputs from ad-hoc testing sessions, not real deliverables
+outputs/sahi_test/
+outputs/waldo_test/
+outputs/tracks/*.mp4
+outputs/predictions/argus_test_frame27_0.jpg
+
+# regenerable TensorRT export artifacts (see export_trt.py) - large, rebuild locally instead
+weights/*.onnx
+weights/*.engine

@@ -38,6 +38,41 @@ WEIGHTS = {
     "26x": {"path": ROOT / "weights" / "argus_yolo26x_1280_ncnn_model", "imgsz": 1280},  # most accurate, heaviest
 }
 
+# GPU path - see main.py for the full rationale (this box is actually a
+# Jetson Orin NX, not a Pi 5). Picks up the TensorRT .engine automatically
+# once export_trt.py finishes building it; falls back to the plain .pt until
+# then. No GPU equivalent of "fast" - that's an NCNN-only imgsz-shrink trick.
+GPU_WEIGHTS = {
+    "11l": ROOT / "weights" / "argus_yolo11l_1280",
+    "11x": ROOT / "weights" / "argus_yolo11x_1280",
+    "26x": ROOT / "weights" / "argus_yolo26x_1280",
+}
+GPU_IMGSZ = 1280
+
+
+def resolve_gpu_weights(weights_key):
+    if weights_key == "fast":
+        weights_key = "11l"
+    base = GPU_WEIGHTS[weights_key]
+    engine, pt = base.with_suffix(".engine"), base.with_suffix(".pt")
+    return (engine if engine.exists() else pt), weights_key
+
+
+# WALDO30 (github.com/stephansturges/WALDO) - see main.py for the full
+# rationale/benchmarks. General-purpose overhead detector, NOT ARGUS-tuned:
+# fast, confident LightVehicle/Truck/Bus detection but weak Person recall on
+# close-range rescue scenes (0 detections at conf=0.25 in testing; best
+# candidate was only 0.18 even at conf=0.05). Use for vehicle/infrastructure
+# awareness, not as a human-detection replacement for ARGUS. GPU-only - only
+# .pt checkpoints were pulled, no NCNN export made.
+WALDO_WEIGHTS = {
+    "waldo-n": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8n_640x640.pt", "imgsz": 640},
+    "waldo-n-p2": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8n-p2_640x640.pt", "imgsz": 640},
+    "waldo-l-p2": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8l-p2_1024x1024.pt", "imgsz": 1024},
+    "waldo-m": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8m_640x640.pt", "imgsz": 640},
+    "waldo-l": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8l_640x640.pt", "imgsz": 640},  # no P2 head, unlike waldo-l-p2
+}
+
 
 def limit_ncnn_threads(model, imgsz, n_threads):
     """Cap NCNN's thread pool so this dev box previews Pi 5-realistic speed (4 cores, not this box's 8).
@@ -71,39 +106,62 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--weights",
-        choices=WEIGHTS.keys(),
+        choices=(*WEIGHTS.keys(), *WALDO_WEIGHTS.keys()),
         default="fast",
-        help="which ARGUS-YOLO checkpoint to use (default: fast, 288x480 rectangular)",
+        help="which checkpoint to use (default: fast, ARGUS 288x480 rectangular), or a waldo-* checkpoint - "
+             "general-purpose, non-ARGUS-tuned (see WALDO_WEIGHTS comment above). GPU-only.",
     )
     parser.add_argument(
         "--source",
         default=str(ROOT / "assets" / "mosaic_val.jpg"),
         help="image (or dir/video) to run detection on",
     )
+    parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu",
+                         help="cpu = NCNN Pi-5-preview path (default, unchanged). gpu = run on this box's Jetson Orin GPU at native 1280px "
+                              "(uses the TensorRT .engine if exported, else the plain .pt); ignores --weights=fast and --pi-cores")
     parser.add_argument("--imgsz", type=int, default=None, help="must match the chosen weights' export size; omit to use it automatically")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--pi-cores", type=int, default=4,
                          help="cap NCNN threads to this many, to preview Raspberry Pi 5 (4 cores) speed instead of this dev machine's full core count; 0 = use all cores")
     args = parser.parse_args()
 
-    choice = WEIGHTS[args.weights]
-    if args.imgsz is None:
+    if args.weights in WALDO_WEIGHTS:
+        if args.device != "gpu":
+            raise SystemExit(f"--weights {args.weights} is GPU-only (no NCNN export was made for WALDO); pass --device gpu.")
+        choice = WALDO_WEIGHTS[args.weights]
+        if args.imgsz is not None and args.imgsz != choice["imgsz"]:
+            raise SystemExit(f"--weights {args.weights} is native imgsz={choice['imgsz']}; pass that or omit --imgsz.")
         args.imgsz = choice["imgsz"]
-    elif args.imgsz != choice["imgsz"]:
-        raise SystemExit(
-            f"--weights {args.weights} is an NCNN export fixed at imgsz={choice['imgsz']}; "
-            f"a mismatched --imgsz {args.imgsz} won't error, it will just hang. "
-            f"Pass --imgsz {choice['imgsz']} or omit --imgsz."
-        )
+        weights_path = choice["path"]
+        print(f"--device gpu: using {weights_path.name} (WALDO, non-ARGUS-tuned - see WALDO_WEIGHTS comment)")
+    elif args.device == "gpu":
+        weights_path, resolved_key = resolve_gpu_weights(args.weights)
+        if resolved_key != args.weights:
+            print(f"--device gpu: '{args.weights}' has no GPU checkpoint (NCNN-only trick); using '{resolved_key}' @1280 instead.")
+        if args.imgsz is not None and args.imgsz != GPU_IMGSZ:
+            raise SystemExit(f"--device gpu checkpoints are all native imgsz={GPU_IMGSZ}; pass --imgsz {GPU_IMGSZ} or omit --imgsz.")
+        args.imgsz = GPU_IMGSZ
+        print(f"--device gpu: using {weights_path.name}")
+    else:
+        choice = WEIGHTS[args.weights]
+        if args.imgsz is None:
+            args.imgsz = choice["imgsz"]
+        elif args.imgsz != choice["imgsz"]:
+            raise SystemExit(
+                f"--weights {args.weights} is an NCNN export fixed at imgsz={choice['imgsz']}; "
+                f"a mismatched --imgsz {args.imgsz} won't error, it will just hang. "
+                f"Pass --imgsz {choice['imgsz']} or omit --imgsz."
+            )
+        weights_path = choice["path"]
 
-    model = YOLO(str(choice["path"]))
-    if args.pi_cores > 0:
+    model = YOLO(str(weights_path))
+    if args.device == "cpu" and args.pi_cores > 0:
         limit_ncnn_threads(model, args.imgsz, args.pi_cores)
     results = model.predict(
         source=args.source,
         imgsz=args.imgsz,
         conf=args.conf,
-        device="cpu",
+        device=0 if args.device == "gpu" else "cpu",
     )
 
     out_dir = ROOT / "outputs" / "predictions"

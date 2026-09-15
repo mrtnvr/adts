@@ -97,6 +97,57 @@ WEIGHTS = {
     "26x": {"path": ROOT / "weights" / "argus_yolo26x_1280_ncnn_model", "imgsz": 1280},  # most accurate, heaviest
 }
 
+# GPU path (this box is actually a Jetson Orin NX, not a Pi 5 - `nvidia-smi`/
+# torch.cuda both confirm a working CUDA device). Benchmarked on a real frame
+# from videos/ankara_drone_clip20s.mp4: raw .pt 11l @1280 FP16 on the GPU
+# (120ms/frame, 14 detections) already beats CPU NCNN "fast" 288x480 (142ms/
+# frame, 5 detections) while running at full native resolution instead of a
+# downscaled crop. TensorRT (.engine) is faster still - export_trt.py builds
+# an FP16 engine once; this picks it up automatically the moment it exists,
+# no code change needed, and falls back to the plain .pt in the meantime.
+# There's no GPU equivalent of "fast": that key is an NCNN-only trick to claw
+# back CPU speed by shrinking imgsz, which the GPU doesn't need.
+GPU_WEIGHTS = {
+    "11l": ROOT / "weights" / "argus_yolo11l_1280",
+    "11x": ROOT / "weights" / "argus_yolo11x_1280",
+    "26x": ROOT / "weights" / "argus_yolo26x_1280",
+}
+GPU_IMGSZ = 1280
+
+
+def resolve_gpu_weights(weights_key):
+    if weights_key == "fast":
+        weights_key = "11l"
+    base = GPU_WEIGHTS[weights_key]
+    engine, pt = base.with_suffix(".engine"), base.with_suffix(".pt")
+    return (engine if engine.exists() else pt), weights_key
+
+
+# WALDO30 (github.com/stephansturges/WALDO) - a general-purpose overhead-imagery
+# detector (YOLOv8, MIT-ish license, civilian use only), NOT ARGUS-tuned.
+# 12 classes incl. LightVehicle/Truck/Bus/Person/Building/UPole/Container/etc,
+# used as-is here - draw_detect_boxes() reads labels from model.names, so the
+# richer taxonomy just works, no code change needed there.
+# GPU-only: only .pt checkpoints were pulled, no NCNN export was made/tested.
+# Benchmarked on assets/mosaic_val.jpg (a close-range rescue scene, RTX-class
+# accuracy claims don't apply - this is an Orin NX): waldo-n and waldo-n-p2
+# are ~2x faster than argus 11l (171-224ms vs 387ms) with strong, confident
+# LightVehicle/Truck/Bus detections (conf 0.4-0.9+) - a genuinely good fast
+# vehicle pre-filter. BUT Person recall on this domain is weak: 0 detections
+# at the standard conf=0.25 across all 3 WALDO sizes on an image with real
+# people in it; even at conf=0.05 the best candidate was only 0.18 - WALDO
+# was trained on general "30ft-to-satellite" overhead imagery, not fine-tuned
+# on close-range rescue scenes the way ARGUS's own human class was. Use WALDO
+# for fast vehicle/infrastructure awareness; keep ARGUS for human detection,
+# the actual search-and-rescue mission.
+WALDO_WEIGHTS = {
+    "waldo-n": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8n_640x640.pt", "imgsz": 640},
+    "waldo-n-p2": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8n-p2_640x640.pt", "imgsz": 640},
+    "waldo-l-p2": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8l-p2_1024x1024.pt", "imgsz": 1024},
+    "waldo-m": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8m_640x640.pt", "imgsz": 640},
+    "waldo-l": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8l_640x640.pt", "imgsz": 640},  # no P2 head, unlike waldo-l-p2
+}
+
 WINDOW_NAME = "ARGUS-YOLO - click=track, right-click=clear, c=disable ROI, r=enable ROI, f=skip 60 frames, q=quit"
 
 BOX_COLOR = (255, 180, 0)  # detect-mode boxes (BGR)
@@ -166,12 +217,13 @@ class DetectorThread:
     out the difference before picking up the next frame.
     """
 
-    def __init__(self, model, imgsz, conf, names, min_interval=0.0):
+    def __init__(self, model, imgsz, conf, names, min_interval=0.0, device="cpu"):
         self.model = model
         self.imgsz = imgsz
         self.conf = conf
         self.names = names
         self.min_interval = min_interval
+        self.device = device
         self._lock = threading.Lock()
         self._pending_frame = None
         self._new_frame = threading.Event()
@@ -204,7 +256,7 @@ class DetectorThread:
                 continue
 
             t0 = time.time()
-            results = self.model.predict(frame, imgsz=self.imgsz, conf=self.conf, device="cpu", verbose=False)
+            results = self.model.predict(frame, imgsz=self.imgsz, conf=self.conf, device=self.device, verbose=False)
             r = results[0]
             boxes = []
             for b in r.boxes:
@@ -369,7 +421,14 @@ def draw_target_box(frame, bbox, label):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", required=True, help="video file path, RTSP/HTTP URL, or webcam index (e.g. '0')")
-    parser.add_argument("--weights", choices=WEIGHTS.keys(), default="fast", help="ARGUS-YOLO checkpoint (default: fast, 288x480 rectangular)")
+    parser.add_argument("--weights", choices=(*WEIGHTS.keys(), *WALDO_WEIGHTS.keys()), default="fast",
+                         help="ARGUS-YOLO checkpoint (default: fast, 288x480 rectangular), or a waldo-* checkpoint - a general-purpose, "
+                              "non-ARGUS-tuned overhead detector (12 classes incl. LightVehicle/Truck/Bus/Person/Building/...); "
+                              "fast vehicle detection but weak Person recall on this domain (see WALDO_WEIGHTS comment above). GPU-only.")
+    parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu",
+                         help="cpu = NCNN Pi-5-preview path (default, unchanged; not available for waldo-* weights). gpu = run on this box's "
+                              "Jetson Orin GPU (ARGUS: native 1280px, uses the TensorRT .engine if exported else the plain .pt; "
+                              "waldo-*: that checkpoint's own native imgsz); ignores --pi-cores, and --weights=fast maps to ARGUS 11l@1280")
     parser.add_argument("--imgsz", type=int, default=None, help="must match the chosen weights' export size (see --weights); omit to use it automatically")
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--pi-cores", type=int, default=4,
@@ -380,15 +439,34 @@ def main():
                          help="cap display playback rate to this many FPS, so a recorded video plays at realistic speed instead of fast-forwarding through it as fast as decode+draw allow; 0 = uncapped (default)")
     args = parser.parse_args()
 
-    choice = WEIGHTS[args.weights]
-    if args.imgsz is None:
+    if args.weights in WALDO_WEIGHTS:
+        if args.device != "gpu":
+            raise SystemExit(f"--weights {args.weights} is GPU-only (no NCNN export was made for WALDO); pass --device gpu.")
+        choice = WALDO_WEIGHTS[args.weights]
+        if args.imgsz is not None and args.imgsz != choice["imgsz"]:
+            raise SystemExit(f"--weights {args.weights} is native imgsz={choice['imgsz']}; pass that or omit --imgsz.")
         args.imgsz = choice["imgsz"]
-    elif args.imgsz != choice["imgsz"]:
-        raise SystemExit(
-            f"--weights {args.weights} is an NCNN export fixed at imgsz={choice['imgsz']}; "
-            f"a mismatched --imgsz {args.imgsz} won't error, it will just hang. "
-            f"Pass --imgsz {choice['imgsz']} or omit --imgsz."
-        )
+        weights_path = choice["path"]
+        print(f"--device gpu: using {weights_path.name} (WALDO, non-ARGUS-tuned - see WALDO_WEIGHTS comment)")
+    elif args.device == "gpu":
+        weights_path, resolved_key = resolve_gpu_weights(args.weights)
+        if resolved_key != args.weights:
+            print(f"--device gpu: '{args.weights}' has no GPU checkpoint (NCNN-only trick); using '{resolved_key}' @1280 instead.")
+        if args.imgsz is not None and args.imgsz != GPU_IMGSZ:
+            raise SystemExit(f"--device gpu checkpoints are all native imgsz={GPU_IMGSZ}; pass --imgsz {GPU_IMGSZ} or omit --imgsz.")
+        args.imgsz = GPU_IMGSZ
+        print(f"--device gpu: using {weights_path.name}")
+    else:
+        choice = WEIGHTS[args.weights]
+        if args.imgsz is None:
+            args.imgsz = choice["imgsz"]
+        elif args.imgsz != choice["imgsz"]:
+            raise SystemExit(
+                f"--weights {args.weights} is an NCNN export fixed at imgsz={choice['imgsz']}; "
+                f"a mismatched --imgsz {args.imgsz} won't error, it will just hang. "
+                f"Pass --imgsz {choice['imgsz']} or omit --imgsz."
+            )
+        weights_path = choice["path"]
 
     source = int(args.video) if args.video.isdigit() else args.video
     cap = cv2.VideoCapture(source)
@@ -402,11 +480,12 @@ def main():
     native_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     min_interval = args.detect_stride / native_fps
 
-    model = YOLO(str(choice["path"]))
+    model = YOLO(str(weights_path))
     names = model.names
-    if args.pi_cores > 0:
+    if args.device == "cpu" and args.pi_cores > 0:
         limit_ncnn_threads(model, args.imgsz, args.pi_cores)
-    detector = DetectorThread(model, args.imgsz, args.conf, names, min_interval=min_interval)
+    detector_device = 0 if args.device == "gpu" else "cpu"
+    detector = DetectorThread(model, args.imgsz, args.conf, names, min_interval=min_interval, device=detector_device)
 
     app = App()
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
