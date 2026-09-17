@@ -2,8 +2,8 @@
 """Run YOLO + ByteTrack/BotSORT multi-object tracking on a video/stream, live by default.
 
 Defaults to --device gpu --weights waldo-l-p2 --show: this box is actually a
-Jetson Orin NX (not the Pi 5 the project originally targeted - see main.py),
-and WALDO30 is a fast, general-purpose overhead detector that's a good live
+Jetson Orin NX (not the Pi 5 the project originally targeted), and WALDO30
+is a fast, general-purpose overhead detector that's a good live
 vehicle/infrastructure tracker (see WALDO_WEIGHTS comment below) - but it has
 weak Person recall on close-range rescue scenes, so pass --weights fast (or
 11l/11x/26x) for ARGUS's own, human-detection-tuned checkpoints; pass
@@ -50,13 +50,19 @@ cv2.setNumThreads(2)
 ROOT = Path(__file__).parent
 
 # NCNN (not raw .pt) is the default backend: ~4x faster than PyTorch at the
-# same imgsz on this CPU. RoblabWhGe only ships 3 ARGUS-tuned sizes
-# (11l/11x/26x) - "fast" is the same 11l weights re-exported at a rectangular
-# 288x480 (matches the 16:9 source instead of padding a square to it - see
-# main.py for the full size/format comparison, including why int8 was tried
-# and rejected). NCNN exports are FIXED-SHAPE - requesting a mismatched
-# imgsz hangs rather than erroring, so each entry carries the imgsz (int =
-# square, tuple = (h, w)) it was exported at and main() enforces it.
+# same imgsz on this CPU (benchmarked: 1280px 4.73s/frame -> 1.23s/frame).
+# RoblabWhGe only ships 3 ARGUS-tuned sizes (11l/11x/26x) - "fast" is the
+# same 11l weights re-exported at a rectangular 288x480 (matches the 16:9
+# source instead of padding a square to it), the fastest option found in
+# testing (0.14s/frame) with no accuracy tradeoff versus square 480
+# (0.90s/frame) - square 480 letterboxes ~44% of the tensor with dead
+# padding since the source isn't square. int8 (480 square) was tried and
+# rejected: ncnn2int8 only quantizes plain Convolution layers, leaving
+# YOLO11's Attention/C2PSA/DFL blocks in fp32, so the resulting fp32<->int8
+# requant/dequant overhead made it SLOWER (541-611ms) than fp16. NCNN
+# exports are FIXED-SHAPE - requesting a mismatched imgsz hangs rather than
+# erroring, so each entry carries the imgsz (int = square, tuple = (h, w))
+# it was exported at and main() enforces it.
 WEIGHTS = {
     "fast": {"path": ROOT / "weights" / "argus_yolo11l_480_ncnn_model", "imgsz": (288, 480)},  # default
     "11l": {"path": ROOT / "weights" / "argus_yolo11l_640_ncnn_model", "imgsz": 640},
@@ -64,10 +70,14 @@ WEIGHTS = {
     "26x": {"path": ROOT / "weights" / "argus_yolo26x_1280_ncnn_model", "imgsz": 1280},  # most accurate, heaviest
 }
 
-# GPU path - see main.py for the full rationale (this box is actually a
-# Jetson Orin NX, not a Pi 5). Picks up the TensorRT .engine automatically
-# once export_trt.py finishes building it; falls back to the plain .pt until
-# then. No GPU equivalent of "fast" - that's an NCNN-only imgsz-shrink trick.
+# GPU path (this box is actually a Jetson Orin NX, not a Pi 5). Benchmarked
+# on a real frame: raw .pt 11l @1280 FP16 on the GPU (120ms/frame, 14
+# detections) already beats CPU NCNN "fast" 288x480 (142ms/frame, 5
+# detections) while running at full native resolution instead of a
+# downscaled crop. Picks up the TensorRT .engine automatically once
+# export_trt.py finishes building it; falls back to the plain .pt until
+# then. No GPU equivalent of "fast" - that's an NCNN-only imgsz-shrink trick
+# the GPU doesn't need.
 GPU_WEIGHTS = {
     "11l": ROOT / "weights" / "argus_yolo11l_1280",
     "11x": ROOT / "weights" / "argus_yolo11x_1280",
@@ -84,13 +94,15 @@ def resolve_gpu_weights(weights_key):
     return (engine if engine.exists() else pt), weights_key
 
 
-# WALDO30 (github.com/stephansturges/WALDO) - see main.py for the full
-# rationale/benchmarks. General-purpose overhead detector, NOT ARGUS-tuned:
-# fast, confident LightVehicle/Truck/Bus detection but weak Person recall on
-# close-range rescue scenes (0 detections at conf=0.25 in testing; best
-# candidate was only 0.18 even at conf=0.05). Use for vehicle/infrastructure
-# awareness, not as a human-detection replacement for ARGUS. GPU-only - only
-# .pt checkpoints were pulled, no NCNN export made.
+# WALDO30 (github.com/stephansturges/WALDO) - general-purpose overhead
+# detector, NOT ARGUS-tuned: ~2x faster than ARGUS 11l (171-224ms vs 387ms
+# for waldo-n/-n-p2) with fast, confident LightVehicle/Truck/Bus detection,
+# but weak Person recall on close-range rescue scenes (0 detections at
+# conf=0.25 in testing; best candidate was only 0.18 even at conf=0.05) -
+# WALDO was trained on general overhead imagery, not fine-tuned on
+# close-range rescue scenes the way ARGUS's own human class was. Use for
+# vehicle/infrastructure awareness, not as a human-detection replacement for
+# ARGUS. GPU-only - only .pt checkpoints were pulled, no NCNN export made.
 WALDO_WEIGHTS = {
     "waldo-n": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8n_640x640.pt", "imgsz": 640},
     "waldo-n-p2": {"path": ROOT / "weights" / "waldo" / "WALDO30_yolov8n-p2_640x640.pt", "imgsz": 640},
@@ -124,8 +136,35 @@ WALDO_NAMES_TR = {
 }
 
 
-BOX_COLOR = (255, 180, 0)  # BGR, matches main.py's detect-mode box color
-ROI_COLOR = (0, 200, 255)  # matches main.py's ROI rectangle color
+BOX_COLOR = (255, 180, 0)  # BGR, detect-mode box color
+DIM_COLOR = (110, 110, 110)  # non-selected boxes once a target is picked (click-to-highlight)
+TARGET_COLOR = (0, 255, 0)  # selected track
+ROI_COLOR = (0, 200, 255)
+
+
+class TrackSelection:
+    """Click-to-highlight state: an earlier version of this project used a classical CV
+    tracker (OpenCV CSRT) that swapped in per-target once clicked, turning detection off
+    entirely. YOLO+ByteTrack keep running on every object regardless of selection - this
+    only changes which track_id gets drawn prominently. ByteTrack's own track_id already
+    gives every object a stable identity across frames, so "locking onto" one is just
+    filtering the draw, not swapping in a separate CV tracker."""
+
+    def __init__(self):
+        self.selected_id = None
+        self.boxes = []  # this frame's boxes in FULL-FRAME coords, kept current by the main loop for on_mouse to hit-test
+
+    def on_mouse(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for x1, y1, x2, y2, track_id, cls_name, conf in self.boxes:
+                # track_id is None in --no-track mode (no stable identity to select) -
+                # skip it, since a "selected" None would be indistinguishable from the
+                # cleared (no selection) state below.
+                if track_id is not None and x1 <= x <= x2 and y1 <= y <= y2:
+                    self.selected_id = track_id
+                    break
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            self.selected_id = None
 
 
 def draw_roi_rect(frame, roi_box):
@@ -202,7 +241,7 @@ def smooth_boxes(boxes_list, smoothed_state, alpha):
     return out
 
 
-def draw_boxes(frame, boxes_list, offset=(0, 0)):
+def draw_boxes(frame, boxes_list, offset=(0, 0), selected_id=None):
     # Manual drawing (not r.plot()) so the exact same code path handles both a
     # real Results object's boxes (via boxes_from_results) and the tracker's
     # own predicted-only state on a skipped detection frame (via
@@ -211,21 +250,28 @@ def draw_boxes(frame, boxes_list, offset=(0, 0)):
     # cv2.putText (labels are already ASCII, see WALDO_NAMES_TR) - cheaper
     # than r.plot()'s PIL path too. offset shifts from a --roi crop's origin
     # back to full-frame coordinates; (0, 0) when --roi is off.
+    #
+    # selected_id: click-to-highlight target (see TrackSelection) - when set,
+    # every other box is dimmed instead of hidden, so the rest of the scene
+    # (and the tracker/detector still running on it) stays visible.
     ox, oy = offset
     for x1, y1, x2, y2, track_id, cls_name, conf in boxes_list:
         x1, y1, x2, y2 = x1 + ox, y1 + oy, x2 + ox, y2 + oy
+        is_target = selected_id is not None and track_id == selected_id
+        color = TARGET_COLOR if is_target else (BOX_COLOR if selected_id is None else DIM_COLOR)
+        thickness = 2 if is_target else 1
         label = f"id:{track_id} {cls_name} {conf:.2f}" if track_id is not None else f"{cls_name} {conf:.2f}"
-        cv2.rectangle(frame, (x1, y1), (x2, y2), BOX_COLOR, 1)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.28, 1)
-        cv2.rectangle(frame, (x1, y1 - th - 3), (x1 + tw + 2, y1), BOX_COLOR, -1)
+        cv2.rectangle(frame, (x1, y1 - th - 3), (x1 + tw + 2, y1), color, -1)
         cv2.putText(frame, label, (x1 + 1, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.28, (0, 0, 0), 1, cv2.LINE_AA)
 
 
 def draw_stats(frame, model_name, dt, fps):
-    # Same top-right, outlined-text style as main.py's draw_fps. dt is the full
-    # per-frame elapsed time (inference + tracker + plot/display), in ms, not
-    # just the model's own inference time - "the image actually reaching the
-    # screen took this long", matching what fps is computed from.
+    # Top-right, outlined text (black stroke + colored fill) for readability over any
+    # frame content. dt is the full per-frame elapsed time (inference + tracker +
+    # plot/display), in ms, not just the model's own inference time - "the image
+    # actually reaching the screen took this long", matching what fps is computed from.
     lines = [model_name, f"{dt * 1000:.0f} ms | {fps:.1f} FPS"]
     for i, text in enumerate(lines):
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -314,9 +360,10 @@ def main():
                               "instead of guessing from the single combined ms/FPS number on screen")
     parser.add_argument("--roi", type=float, default=0.0,
                          help="crop each frame to this fraction of width/height, centered, before detecting/tracking/displaying (e.g. "
-                              "0.5 = center half); 0 = off (full frame, default). Fewer source pixels to decode/resize is a genuine speed "
-                              "win here (unlike main.py's NCNN path, where a fixed-shape export resizes back up regardless) - same object "
-                              "then fills more of the model's input too, which helps small-object recall, matching main.py's ROI rationale")
+                              "0.5 = center half); 0 = off (full frame, default), otherwise must be in (0, 1]. Fewer source pixels to "
+                              "decode/resize is a genuine speed win here (unlike the NCNN weights above, which are FIXED-SHAPE exports that "
+                              "resize the crop back up to the same imgsz regardless) - the same real-world object also fills more of the "
+                              "model's input after cropping, which helps small-object recall")
     parser.add_argument("--half", action=argparse.BooleanOptionalAction, default=True,
                          help="FP16 inference on GPU (default: on; no effect with --device cpu, PyTorch CPU FP16 isn't a speed win). "
                               "Benchmarked on waldo-m: 56.9ms FP32 -> 40.4ms FP16, ~29%% faster, for free (no accuracy tradeoff noted)")
@@ -334,6 +381,12 @@ def main():
 
     if args.detect_stride > 1 and not args.track:
         raise SystemExit("--detect-stride > 1 needs a tracker to fill the skipped frames; pass --track (the default) or drop --detect-stride.")
+
+    if not 0.0 <= args.roi <= 1.0:
+        # >1.0 would make rx/ry negative below, and raw_frame[ry:ry+rh, rx:rx+rw] with a
+        # negative start silently wraps around (numpy slicing), cropping the wrong region
+        # instead of erroring.
+        raise SystemExit(f"--roi must be between 0 and 1.0 (0 = off, full frame); got {args.roi}.")
 
     if args.weights in WALDO_WEIGHTS:
         if args.device != "gpu":
@@ -411,8 +464,10 @@ def main():
             raise SystemExit(f"Could not open source: {args.source}")
 
         mode_label = args.tracker if args.track else "no-track"
-        window_name = f"ARGUS-YOLO track ({args.weights}, {mode_label}) - f=skip 60 frames, q=quit"
+        window_name = f"ARGUS-YOLO track ({args.weights}, {mode_label}) - click=highlight, right-click=clear, f=skip 60 frames, q=quit"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        selection = TrackSelection()
+        cv2.setMouseCallback(window_name, selection.on_mouse)
         ema_fps = 0.0
         frame_count = 0  # frame 0 always detects, so model.predictor exists before any --detect-stride skip needs it
         smoothed_state = {}  # track_id -> last EMA-smoothed (x1,y1,x2,y2), for smooth_boxes()
@@ -439,12 +494,12 @@ def main():
             roi_box = None
             if args.roi > 0:
                 # Crop BEFORE detection, not after: fewer source pixels means a
-                # genuinely cheaper decode->resize step (unlike main.py's NCNN
-                # path, which is fixed-shape and resizes back up regardless),
-                # and the same real-world object now fills more of the model's
-                # input - the small-object recall benefit main.py's own ROI
-                # gets from "zooming in". raw_frame itself is left untouched
-                # (full frame) so it can still be shown with the ROI marked.
+                # genuinely cheaper decode->resize step (unlike the NCNN weights above,
+                # which are fixed-shape and resize the crop back up regardless), and the
+                # same real-world object now fills more of the model's input - the
+                # small-object recall benefit that comes from "zooming in". raw_frame
+                # itself is left untouched (full frame) so it can still be shown with the
+                # ROI marked.
                 h, w = raw_frame.shape[:2]
                 rw, rh = int(w * args.roi), int(h * args.roi)
                 rx, ry = (w - rw) // 2, (h - rh) // 2
@@ -480,11 +535,16 @@ def main():
             # handles both cases uniformly instead (see its docstring).
             t0 = time.time()
             frame = raw_frame.copy()
+            offset = roi_box[:2] if roi_box is not None else (0, 0)
+            # click-to-highlight needs FULL-FRAME coords to hit-test against
+            # (on_mouse gets screen/window coords) - boxes_list itself stays
+            # in ROI-crop-relative coords until draw_boxes applies offset.
+            ox, oy = offset
+            selection.boxes = [(x1 + ox, y1 + oy, x2 + ox, y2 + oy, tid, cls_name, conf)
+                                for x1, y1, x2, y2, tid, cls_name, conf in boxes_list]
             if roi_box is not None:
                 draw_roi_rect(frame, roi_box)
-                draw_boxes(frame, boxes_list, roi_box[:2])
-            else:
-                draw_boxes(frame, boxes_list)
+            draw_boxes(frame, boxes_list, offset, selected_id=selection.selected_id)
             plot_ms = (time.time() - t0) * 1000
             copy_ms = 0.0
 
