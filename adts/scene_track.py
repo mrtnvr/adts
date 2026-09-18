@@ -10,12 +10,15 @@ off per target. Here it is a second, independent mode next to YOLO + ByteTrack: 
 holds the lock is TargetLock.mode.
 """
 
+import time
+
 import cv2
 
 GATE_SIZES = ("S", "M", "L")
 # Gate side as a fraction of frame WIDTH (square gate, so S/M/L mean the same angular size
 # regardless of aspect ratio).
 GATE_FRACTION = {"S": 0.08, "M": 0.15, "L": 0.25}
+PREVIEW_S = 3.0  # how long a size change flashes the jagged preview box (render.py)
 
 
 def _new_csrt():
@@ -34,17 +37,25 @@ class SceneTracker:
         self.w, self.h = frame_size
         self.gate = gate if gate in GATE_FRACTION else "M"
         self._tracker = None
+        self.preview_until = 0.0
 
     @property
     def active(self):
         return self._tracker is not None
 
+    @property
+    def previewing(self):
+        return time.monotonic() < self.preview_until
+
     def set_gate(self, gate):
         """Gate size only decides what a future start() grabs, so changing it mid-track is
-        harmless and leaves the current lock alone."""
+        harmless and leaves the current lock alone. Every accepted change starts a fresh
+        PREVIEW_S window (render.py's jagged box), even if it lands back on the same size,
+        since it's the operator's confirmation that the command landed."""
         if gate not in GATE_FRACTION:
             return False
         self.gate = gate
+        self.preview_until = time.monotonic() + PREVIEW_S
         return True
 
     def step_gate(self, step=1):

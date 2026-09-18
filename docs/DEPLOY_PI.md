@@ -192,7 +192,7 @@ target doesn't have to be one of WALDO's 12 classes, and it works with detection
 |---|---|
 | p1=1 | takip BASLAT: lock whatever is inside the gate |
 | p1=0 | takip IPTAL (refused with FAILED if no scene track is running) |
-| p1=2, p2 | kapi boyutu: 0=S, 1=M, 2=L, -1 = next. The gate is drawn at the centre whenever nothing is being tracked |
+| p1=2, p2 | kapi boyutu: 0=S, 1=M, 2=L, -1 = next. The gate is drawn at the centre whenever nothing is being tracked; a size change flashes it as a jagged (tirtikli) box for 3s, on top of whatever else is on screen, then it settles back to the thin steady-state outline |
 
 **Overlay** — `MAV_CMD_USER_3` (31012). All four take effect on the next frame, on HDMI,
 UDP and the recording alike.

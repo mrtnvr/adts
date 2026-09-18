@@ -59,3 +59,29 @@ def test_overlay_off_leaves_the_frame_untouched():
     before = img.copy()
     draw(img, tracks, lock, WALDO_NAMES, STATS, OverlayConfig(on=False))
     assert np.array_equal(img, before)
+
+
+def test_gate_preview_draws_even_while_locked():
+    lock = TargetLock((W, H), 66)
+    assert lock.start_scene(np.zeros((H, W, 3), np.uint8))
+    lock.scene.set_gate("L")  # freshly changed: previewing() is now True
+    assert render(lock, OverlayConfig()).any()
+
+
+def test_outline_pass_never_shifts_the_fill_out_of_registration():
+    """Regression for the old thick+2-vs-thick outline: Hershey glyphs advance wider at a
+    thicker stroke, so drawing the outline pass thicker than the fill pass drifted the two
+    out of registration on long strings (e.g. the AZ/EL readout), printing as a ghosted
+    double image instead of a clean outline."""
+    from adts.render import _text
+
+    img = np.full((60, 400, 3), 90, np.uint8)
+    _text(img, "AZ +3.8  EL -3.4", (12, 40), 0.55, (0, 255, 0), 1)
+    green = np.array([0, 255, 0])
+    fill_cols = np.where((img == green).all(axis=2).any(axis=0))[0]
+    # A drifted outline leaves stray green pixels beyond the last real glyph column (the
+    # "ghost" tail of a mismatched second pass); a clean render's rightmost green pixel sits
+    # at the actual last stroke, with no black outline pixels beyond it.
+    black = np.array([0, 0, 0])
+    black_cols = np.where((img == black).all(axis=2).any(axis=0))[0]
+    assert black_cols.max() <= fill_cols.max() + 2  # outline hugs the fill, not past it

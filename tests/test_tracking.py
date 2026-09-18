@@ -189,3 +189,23 @@ def test_angle_error_signs():
     lock.state, lock.box = LOCKED, np.array([W - 20, 0, W, 20.0])  # top-right corner
     az, el = lock.angle_error()
     assert 32 < az < 33.1 and el > 0
+
+
+def test_gate_change_starts_a_three_second_preview():
+    from adts.scene_track import PREVIEW_S, SceneTracker
+
+    st = SceneTracker((W, H))
+    assert not st.previewing  # nothing changed yet
+    assert st.set_gate("L") and st.previewing
+    assert st.preview_until - time.monotonic() <= PREVIEW_S + 0.01
+    st.preview_until = time.monotonic() - 0.01  # fast-forward past the window
+    assert not st.previewing
+    assert st.step_gate(1) and st.previewing  # step_gate goes through set_gate too
+
+
+def test_bad_gate_size_is_refused_without_starting_a_preview():
+    from adts.scene_track import SceneTracker
+
+    st = SceneTracker((W, H))
+    assert not st.set_gate("XL")
+    assert not st.previewing

@@ -8,6 +8,7 @@ Every label is ASCII, drawn with plain cv2 (see WALDO_NAMES_TR in classes.py for
 Colours are BGR.
 """
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -45,8 +46,19 @@ def _contrast(color):
     return WHITE if color == BLACK else BLACK
 
 
+_OUTLINE_OFFSETS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
+
+
 def _text(img, s, org, scale=0.5, color=WHITE, thick=1):
-    cv2.putText(img, s, org, FONT, scale, _contrast(color), thick + 2, cv2.LINE_AA)
+    """Outline by re-drawing the SAME string at the SAME thickness, offset by 1px in every
+    direction. Hershey glyphs advance a little wider at a thicker stroke, so drawing the
+    outline pass thicker (the old approach) drifts the two passes apart character by
+    character - on a long string like the AZ/EL readout it ends up visibly double-printed.
+    Every draw here uses `thick`, so nothing can drift out of registration."""
+    ox, oy = org
+    outline = _contrast(color)
+    for dx, dy in _OUTLINE_OFFSETS:
+        cv2.putText(img, s, (ox + dx, oy + dy), FONT, scale, outline, thick, cv2.LINE_AA)
     cv2.putText(img, s, org, FONT, scale, color, thick, cv2.LINE_AA)
 
 
@@ -65,6 +77,31 @@ def _brackets(img, box, color, thick=2):
     for (px, py, dx, dy) in ((x1, y1, 1, 1), (x2, y1, -1, 1), (x1, y2, 1, -1), (x2, y2, -1, -1)):
         cv2.line(img, (px, py), (px + dx * lx, py), color, thick, cv2.LINE_AA)
         cv2.line(img, (px, py), (px, py + dy * ly), color, thick, cv2.LINE_AA)
+
+
+def _dashed_line(img, p1, p2, color, thick, dash=9, gap=6):
+    (x1, y1), (x2, y2) = p1, p2
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length < 1:
+        return
+    ux, uy = (x2 - x1) / length, (y2 - y1) / length
+    pos = 0.0
+    while pos < length:
+        end = min(pos + dash, length)
+        cv2.line(img, (int(x1 + ux * pos), int(y1 + uy * pos)), (int(x1 + ux * end), int(y1 + uy * end)),
+                 color, thick, cv2.LINE_AA)
+        pos += dash + gap
+
+
+def _dashed_rect(img, box, color, thick=2, dash=9, gap=6):
+    """Tirtikli (jagged) marching-ants rectangle: the gate preview after a size change, so it
+    reads as "just changed, look here" rather than the plain steady-state gate outline."""
+    x1, y1, x2, y2 = (float(v) for v in box)
+    corners = ((x1, y1), (x2, y1), (x2, y2), (x1, y2))
+    for i in range(4):
+        _dashed_line(img, corners[i], corners[(i + 1) % 4], _contrast(color), thick + 2, dash, gap)
+    for i in range(4):
+        _dashed_line(img, corners[i], corners[(i + 1) % 4], color, thick, dash, gap)
 
 
 def _box_label(img, box, label, color, thick=1):
@@ -102,7 +139,13 @@ def draw(img, tracks, lock, names, stats, overlay):
     if overlay.reticle:
         _crosshair(img, base)
 
-    if lock.state == IDLE:
+    if lock.scene.previewing:
+        # Gate size just changed: a jagged marching-ants box for 3s, on top of whatever else
+        # is on screen, so the operator gets feedback even if a lock is already engaged.
+        _dashed_rect(img, lock.scene.gate_box(), base, 2)
+        gx1, gy1, _, gy2 = lock.scene.gate_box()
+        _text(img, f"{txt['gate']} {lock.scene.gate}", (int(gx1), int(gy2) + 18), 0.5, base, 2)
+    elif lock.state == IDLE:
         # Nothing engaged: show the scene-track gate so the operator can aim it.
         _brackets(img, lock.scene.gate_box(), base, 1)
         gx1, gy1, _, gy2 = lock.scene.gate_box()
