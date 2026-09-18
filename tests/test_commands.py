@@ -81,9 +81,9 @@ def test_colour_gate_and_language():
     assert not ctl.run("color", 99, [])
     assert ctl.run("gate", 2, []) and lock.scene.gate == "L"
     assert ctl.run("gate", -1, []) and lock.scene.gate == "S"  # wraps round
-    assert ctl.names[1] == "Insan"
-    assert ctl.run("lang", 1, []) and ctl.names[1] == "Person"
-    assert ctl.run("lang", -1, []) and ctl.names[1] == "Insan"
+    assert ctl.names[1] == "Person"  # English is the default
+    assert ctl.run("lang", 0, []) and ctl.names[1] == "Insan"
+    assert ctl.run("lang", -1, []) and ctl.names[1] == "Person"
 
 
 def test_selection_then_engage():

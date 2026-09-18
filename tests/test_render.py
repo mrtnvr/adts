@@ -9,7 +9,7 @@ from adts.render import COLOR_NAMES, OverlayConfig, draw
 from adts.target import COAST, LOCKED, LOST, TargetLock
 
 W, H = 640, 360
-STATS = {"fps": 30.0, "det_ms": 12.0, "temp_c": 55.0, "mav": True, "rec": True, "ai": True}
+STATS = {"fps": 30.0, "temp_c": 55.0, "mav": True, "rec": True, "ai": True}
 
 
 class FakeTrack:

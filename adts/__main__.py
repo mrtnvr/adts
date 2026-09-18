@@ -48,7 +48,7 @@ def main():
     ap.add_argument("--imgsz", type=int, default=640, help="model input for Ultralytics models (a .hef has its own)")
     ap.add_argument("--conf", type=float, default=0.1, help="detector floor; ByteTrack uses 0.1-0.25 as its low-score band")
     ap.add_argument("--exclude-classes", default="UPole", help="comma-separated WALDO class names to drop")
-    ap.add_argument("--lang", choices=("tr", "en"), default="tr", help="starting overlay language (changeable in flight)")
+    ap.add_argument("--lang", choices=("tr", "en"), default="en", help="starting overlay language (changeable in flight)")
     ap.add_argument("--overlay-color", choices=COLOR_NAMES, default="green",
                     help="starting symbology colour (changeable in flight)")
     ap.add_argument("--gate", choices=[g.lower() for g in GATE_SIZES], default="m",
@@ -114,7 +114,7 @@ def main():
 
     seq, frame_idx = 0, 0
     tracks = []
-    ema_fps, det_ms = 0.0, 0.0
+    ema_fps = 0.0
     prof = {"det": 0.0, "trk": 0.0, "draw": 0.0, "n": 0}
     t_prev = t_report = time.monotonic()
     temp, t_temp = cpu_temp(), 0.0
@@ -133,12 +133,11 @@ def main():
             if not ctl.ai_on:
                 # Detection switched off: the Hailo (or the GPU) stays idle, and nothing is
                 # drawn but the scene track, if one is running.
-                t1, tracks, det_ms = t0, [], 0.0
+                t1, tracks = t0, []
             elif frame_idx % args.detect_stride == 0:
                 dets = detector(frame)
                 t1 = time.monotonic()
                 tracks = tracker.update(dets)
-                det_ms = (t1 - t0) * 1000
             else:
                 t1 = t0
                 tracks = tracker.predict_only()
@@ -174,7 +173,7 @@ def main():
             if now - t_temp > 2:
                 temp, t_temp = cpu_temp(), now
             draw(frame, tracks, lock, ctl.names, {
-                "fps": ema_fps, "det_ms": det_ms, "temp_c": temp, "ai": ctl.ai_on,
+                "fps": ema_fps, "temp_c": temp, "ai": ctl.ai_on,
                 "mav": mav.connected if mav else None, "rec": rec_path is not None}, overlay)
             t3 = time.monotonic()
             for s in sinks:

@@ -29,11 +29,9 @@ WALDO_NAMES_TR = {
 # ASCII only, for the same reason as WALDO_NAMES_TR.
 UI_TEXT = {
     "en": {"IDLE": "IDLE", "LOCKED": "LOCKED", "COAST": "COAST", "LOST": "LOST",
-           "ai_mode": "AI TRACK", "scene_mode": "SCENE TRACK", "ai": "AI", "on": "ON", "off": "OFF",
-           "det": "DET", "tgt": "TGT", "sel": "SEL", "gate": "GATE", "scene": "SCENE"},
+           "ai": "AI", "off": "OFF", "tgt": "TGT", "sel": "SEL", "gate": "GATE", "scene": "SCENE"},
     "tr": {"IDLE": "BOSTA", "LOCKED": "KILITLI", "COAST": "TAHMIN", "LOST": "KAYIP",
-           "ai_mode": "YZ TAKIP", "scene_mode": "SAHNE TAKIP", "ai": "YZ", "on": "ACIK", "off": "KAPALI",
-           "det": "TESPIT", "tgt": "HEDEF", "sel": "SECILI", "gate": "KAPI", "scene": "SAHNE"},
+           "ai": "YZ", "off": "KAPALI", "tgt": "HEDEF", "sel": "SECILI", "gate": "KAPI", "scene": "SAHNE"},
 }
 
 

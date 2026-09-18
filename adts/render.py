@@ -9,7 +9,6 @@ Colours are BGR.
 """
 
 import math
-import time
 from dataclasses import dataclass
 
 import cv2
@@ -33,7 +32,7 @@ class OverlayConfig:
     """Runtime overlay state. Every field is settable over MAVLink in flight."""
     on: bool = True
     reticle: bool = True
-    lang: str = "tr"
+    lang: str = "en"
     color_idx: int = 0
 
     @property
@@ -107,15 +106,24 @@ def _dashed_rect(img, box, color, thick=2, dash=9, gap=6):
 def _box_label(img, box, label, color, thick=1):
     x1, y1, x2, y2 = (int(v) for v in box)
     cv2.rectangle(img, (x1, y1), (x2, y2), color, thick)
-    (tw, th), _ = cv2.getTextSize(label, FONT, 0.35, 1)
+    (tw, th), _ = cv2.getTextSize(label, FONT, 0.3, 1)
     cv2.rectangle(img, (x1, y1 - th - 4), (x1 + tw + 3, y1), color, -1)
-    cv2.putText(img, label, (x1 + 1, y1 - 3), FONT, 0.35, _contrast(color), 1, cv2.LINE_AA)
+    cv2.putText(img, label, (x1 + 1, y1 - 3), FONT, 0.3, _contrast(color), 1, cv2.LINE_AA)
+
+
+# Text sizes, one step down from the first pass: big enough to read on a phone-sized GCS
+# preview, small enough to stay out of the way of the video underneath.
+BIG, MED, SMALL = 0.62, 0.42, 0.36
 
 
 def draw(img, tracks, lock, names, stats, overlay):
     """tracks: confirmed ByteTrack tracks. lock: TargetLock. names: display names by class index.
-    stats: dict with fps, det_ms, temp_c, mav (bool/None), rec (bool), ai (bool).
-    overlay: OverlayConfig."""
+    stats: dict with fps, temp_c, mav (bool/None), rec (bool), ai (bool).
+    overlay: OverlayConfig.
+
+    The HUD only ever shows what the current state makes relevant - e.g. the selected
+    candidate before engaging, the angle error once locked, never both - so the info on
+    screen stays minimal instead of a fixed block of mostly-empty fields."""
     if not overlay.on:
         return img  # temiz goruntu: nothing burned in, recording included
     txt = ui_text(overlay.lang)
@@ -144,12 +152,12 @@ def draw(img, tracks, lock, names, stats, overlay):
         # is on screen, so the operator gets feedback even if a lock is already engaged.
         _dashed_rect(img, lock.scene.gate_box(), base, 2)
         gx1, gy1, _, gy2 = lock.scene.gate_box()
-        _text(img, f"{txt['gate']} {lock.scene.gate}", (int(gx1), int(gy2) + 18), 0.5, base, 2)
+        _text(img, f"{txt['gate']} {lock.scene.gate}", (int(gx1), int(gy2) + 16), MED, base, 2)
     elif lock.state == IDLE:
         # Nothing engaged: show the scene-track gate so the operator can aim it.
         _brackets(img, lock.scene.gate_box(), base, 1)
         gx1, gy1, _, gy2 = lock.scene.gate_box()
-        _text(img, f"{txt['gate']} {lock.scene.gate}", (int(gx1), int(gy2) + 18), 0.45, base)
+        _text(img, f"{txt['gate']} {lock.scene.gate}", (int(gx1), int(gy2) + 16), SMALL, base)
 
     color = {LOCKED: base, COAST: COAST_COLOR, LOST: LOST_COLOR, IDLE: base}[lock.state]
     if locked and lock.box is not None:
@@ -159,41 +167,40 @@ def draw(img, tracks, lock, names, stats, overlay):
         cv2.line(img, (w // 2, h // 2), (tcx, tcy), color, 1, cv2.LINE_AA)
         what = txt["scene"] if lock.mode == SCENE else (names[lock.cls] if lock.cls is not None else "")
         _text(img, f"{txt['tgt']} {lock.track_id if lock.mode == AI else ''} {what}".replace("  ", " "),
-              (int(x1), max(14, int(y1) - 6)), 0.45, color)
+              (int(x1), max(12, int(y1) - 5)), SMALL, color)
 
     state_label = txt[lock.state]
     if lock.state != IDLE:
         state_label += f" {lock.track_id}" if lock.mode == AI else f" {txt['scene']}"
-    y = 28
-    _text(img, state_label, (12, y), 0.8, color, 2)
-    y += 26
-    _text(img, txt["scene_mode"] if lock.mode == SCENE else txt["ai_mode"], (12, y), 0.5, base)
-    y += 24
-    if stats.get("ai", True):
-        _text(img, f"{txt['det']} {len(tracks)}", (12, y), 0.5, base)
-    else:
-        _text(img, f"{txt['ai']} {txt['off']}", (12, y), 0.5, LOST_COLOR)
-    y += 24
-    sel = lock.selected
-    if sel is not None and not (ai_locked and sel.track_id == lock.track_id):
-        # Which target "takip baslat" would engage, and the ID that "select ID" expects.
-        _text(img, f"{txt['sel']} {sel.track_id} {names[sel.cls]}", (12, y), 0.5, base)
-        y += 24
-    err = lock.angle_error() if locked else None
-    if err:  # fixed left column, so it never collides with target labels near the frame edge
-        _text(img, f"AZ {err[0]:+5.1f}  EL {err[1]:+5.1f}", (12, y), 0.55, color)
+    y = 22
+    _text(img, state_label, (10, y), BIG, color, 2)
+    y += 22
+    if not stats.get("ai", True):
+        # The one warning that always matters, whatever else is or isn't on screen: nothing
+        # is being detected right now.
+        _text(img, f"{txt['ai']} {txt['off']}", (10, y), MED, LOST_COLOR)
+        y += 20
+    if lock.state == IDLE:
+        sel = lock.selected
+        if sel is not None:
+            # Which target "takip baslat" would engage - irrelevant once already locked.
+            _text(img, f"{txt['sel']} {sel.track_id} {names[sel.cls]}", (10, y), MED, base)
+    elif locked:
+        err = lock.angle_error()
+        if err:
+            _text(img, f"AZ {err[0]:+5.1f}  EL {err[1]:+5.1f}", (10, y), MED, color)
 
-    right = [f"{stats.get('fps', 0):4.1f} FPS  {stats.get('det_ms', 0):4.0f} ms"]
-    if stats.get("temp_c") is not None:
-        right.append(f"CPU {stats['temp_c']:.0f}C")
+    right = [f"{stats.get('fps', 0):4.1f} FPS"]
+    temp = stats.get("temp_c")
+    if temp is not None and temp >= 80:  # only surfaced as a warning, not routine telemetry
+        right.append(f"CPU {temp:.0f}C")
     mav = stats.get("mav")
     if mav is not None:
         right.append("MAV OK" if mav else "MAV --")
     for i, s in enumerate(right):
-        (tw, _), _ = cv2.getTextSize(s, FONT, 0.5, 1)
-        warn = s == "MAV --" or (s.startswith("CPU") and stats["temp_c"] >= 80)
-        _text(img, s, (w - tw - 12, 24 + i * 22), 0.5, LOST_COLOR if warn else base)
+        (tw, _), _ = cv2.getTextSize(s, FONT, MED, 1)
+        warn = s == "MAV --" or s.startswith("CPU")
+        _text(img, s, (w - tw - 10, 20 + i * 18), MED, LOST_COLOR if warn else base)
     if stats.get("rec"):
-        cv2.circle(img, (w - 20, h - 20), 7, LOST_COLOR, -1)
-    _text(img, time.strftime("%H:%M:%S"), (12, h - 14), 0.45, base)
+        cv2.circle(img, (w - 16, h - 16), 6, LOST_COLOR, -1)
     return img
