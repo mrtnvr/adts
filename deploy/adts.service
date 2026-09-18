@@ -18,5 +18,32 @@ Nice=-5
 KillSignal=SIGINT
 TimeoutStopSec=10
 
+# Sandboxing. The tracker only needs to read its own repo/venv, talk to the camera/Hailo/
+# serial devices it's already in the video/render/dialout groups for (see pi_setup.sh's
+# step_groups), and write wherever --record points (left under /home by default, which
+# ProtectSystem=strict doesn't touch - only ProtectHome= would, and that's deliberately not
+# set here; a production image locks it down further with a drop-in, see
+# docs/PRODUCTION_HARDENING.md). Kept OFF, on purpose, for now:
+#   ProtectKernelTunables - the governor-pinning ExecStartPre above writes to /sys/.../
+#     cpufreq/scaling_governor; that's a mount-namespace restriction, so it would block that
+#     write even though the command itself runs as root via '+'.
+#   ProtectHome, MemoryDenyWriteExecute, SystemCallFilter, RestrictAddressFamilies - real
+#     candidates, but each risks breaking libcamera/Hailo/GStreamer/pymavlink in a way that's
+#     only visible on real hardware, on a unit that (once hardened for production) has no
+#     shell left to debug it from. Load-test each one on the bench before enabling.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=@REPO@
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectHostname=yes
+ProtectClock=yes
+PrivateTmp=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+
 [Install]
 WantedBy=multi-user.target

@@ -292,3 +292,10 @@ TRACK_RECTANGLE (drag). The log at the bottom shows every ACK and the live LOCKE
 LOST state with its AZ/EL readout. `tools/gcs_link.py` is the connection code both tools
 share; needs tkinter (bundled with python.org's Windows/macOS installers, `sudo apt
 install python3-tk` on Linux).
+
+## Shipping a sealed unit
+
+Everything above sets up a Pi you can SSH into and debug. If this board is going into a
+product where the customer holds the physical device, see docs/PRODUCTION_HARDENING.md
+for locking it down first: no SSH, no console, no login shell, disk encryption, signed
+boot, and a bytecode-only copy of the source.
