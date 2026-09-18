@@ -186,3 +186,8 @@ class ByteTracker:
         for t in self.tracked + self.lost:
             t.mean, t.cov = self.kf.predict(t.mean, t.cov)
         return [t for t in self.tracked if t.activated]
+
+    def reset(self):
+        """Forget every track. Used when AI detection is switched off, so stale boxes stop
+        being drawn and switching it back on doesn't resurrect old IDs."""
+        self.tracked, self.lost = [], []

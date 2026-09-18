@@ -1,12 +1,23 @@
-"""Target lock state machine on top of ByteTrack.
+"""Target lock state machine, in two independent modes.
+
+    AI takip     - the lock follows a ByteTrack track_id (YOLO detections).
+    Sahne takip  - the lock follows a patch of the scene through CSRT (see scene_track.py),
+                   with no detector involved.
+
+Both share one state machine, so the MAVLink status output doesn't care which is driving:
 
     IDLE ─start─► LOCKED ─not detected─► COAST (Kalman prediction, up to coast_s)
                     ▲                      │  same track re-matched, or a NEW track of the
                     └──── re-acquired ◄────┤  same class appears near the prediction
                                            └─ coast_s ran out ─► LOST ─(lost_hold_s)─► IDLE
 
-Commands (start/stop/next/prev/select) come from MAVLink or the dev window through
-the same methods, and each returns True/False, which becomes the MAVLink COMMAND_ACK.
+AI mode separates SELECTING a target from ENGAGING it: `candidates` holds the five
+detections nearest the crosshair (ordered left to right, as the operator sees them),
+select_step/select_id move the highlight, and only engage() actually takes the lock. The
+operator's "İLERİ / GERİ / TAKİP BAŞLAT" buttons map straight onto those.
+
+Commands come from MAVLink or the dev window through the same methods, and each returns
+True/False, which becomes the MAVLink COMMAND_ACK.
 """
 
 import math
@@ -14,7 +25,11 @@ import time
 
 import numpy as np
 
+from .scene_track import SceneTracker
+
 IDLE, LOCKED, COAST, LOST = "IDLE", "LOCKED", "COAST", "LOST"
+AI, SCENE = "ai", "scene"
+MAX_CANDIDATES = 5
 
 
 def _center(b):
@@ -22,22 +37,66 @@ def _center(b):
 
 
 class TargetLock:
-    def __init__(self, frame_size, hfov_deg, vfov_deg=None, coast_s=1.5, lost_hold_s=2.0):
+    def __init__(self, frame_size, hfov_deg, vfov_deg=None, coast_s=1.5, lost_hold_s=2.0, gate="M"):
         self.w, self.h = frame_size
         self.hfov = math.radians(hfov_deg)
         # Without a given VFOV, derive it for square pixels and no sensor crop.
         self.vfov = math.radians(vfov_deg) if vfov_deg else 2 * math.atan(math.tan(self.hfov / 2) * self.h / self.w)
         self.coast_s, self.lost_hold_s = coast_s, lost_hold_s
         self.state = IDLE
+        self.mode = AI
         self.track_id = None
         self.cls = None
         self.box = None  # current target box (frame pixels); predicted while in COAST
         self.state_since = time.monotonic()
         self.lost_frame = 0
+        self.scene = SceneTracker(frame_size, gate)
+        self.candidates = []  # the five tracks nearest the crosshair, left to right
+        self.sel_id = None  # highlighted candidate; engage() is what locks it
+
+    # ---- selection (AI mode) --------------------------------------------
+    def refresh_candidates(self, tracks):
+        """Recompute the candidate set. Called once per frame, before commands run, so
+        İLERİ/GERİ and TAKİP BAŞLAT act on exactly what the operator is looking at."""
+        nearest = sorted(tracks, key=lambda t: math.dist(_center(t.xyxy), (self.w / 2, self.h / 2)))
+        self.candidates = sorted(nearest[:MAX_CANDIDATES], key=lambda t: _center(t.xyxy)[0])
+        ids = [t.track_id for t in self.candidates]
+        if self.sel_id not in ids:
+            # Selection fell out of the set (target left, or nothing selected yet): fall back
+            # to the one nearest the crosshair rather than leaving a dangling highlight.
+            self.sel_id = nearest[0].track_id if nearest else None
+
+    @property
+    def selected(self):
+        return next((t for t in self.candidates if t.track_id == self.sel_id), None)
+
+    def select_step(self, step):
+        """Seçili hedef İLERİ / GERİ. Moves the highlight only; the lock is untouched."""
+        ids = [t.track_id for t in self.candidates]
+        if not ids:
+            return False
+        i = ids.index(self.sel_id) if self.sel_id in ids else 0
+        self.sel_id = ids[(i + step) % len(ids)]
+        return True
+
+    def select_id(self, track_id):
+        """Highlight a candidate by track ID. Only the current five are selectable."""
+        if track_id not in [t.track_id for t in self.candidates]:
+            return False
+        self.sel_id = track_id
+        return True
+
+    def engage(self):
+        """Seçili hedef takip BAŞLAT."""
+        target = self.selected
+        return self._lock(target) if target else False
 
     # ---- commands -------------------------------------------------------
     def _lock(self, track):
+        self.scene.stop()  # taking an AI target ends any scene track
+        self.mode = AI
         self.track_id, self.cls, self.box = track.track_id, track.cls, track.xyxy
+        self.sel_id = track.track_id
         self._set(LOCKED)
         return True
 
@@ -59,48 +118,39 @@ class TargetLock:
         return self.start_point(*_center(rect), tracks)
 
     def start_auto(self, tracks):
-        """Lock the detection nearest the image centre (the crosshair)."""
+        """Lock the detection nearest the image centre (the crosshair), in one step."""
         near = self._nearest(tracks, self.w / 2, self.h / 2, float("inf"))
         return self._lock(near) if near else False
 
-    def select_id(self, track_id, tracks):
-        for t in tracks:
-            if t.track_id == track_id:
-                return self._lock(t)
-        return False
-
-    def cycle(self, step, tracks):
-        """Next/prev target, ordered left to right as the operator sees them."""
-        if not tracks:
+    def start_scene(self, frame):
+        """Sabit sahne/obje takip BAŞLAT: lock whatever is inside the gate. `frame` must be
+        the clean frame, before any symbology is drawn on it."""
+        if not self.scene.start(frame):
             return False
-        order = sorted(tracks, key=lambda t: _center(t.xyxy)[0])
-        ids = [t.track_id for t in order]
-        if self.track_id in ids:
-            return self._lock(order[(ids.index(self.track_id) + step) % len(order)])
-        if self.box is None:  # nothing locked yet: start from the crosshair
-            return self.start_auto(tracks)
-        # Locked target isn't visible (COAST/LOST): step to the first track to its right or left.
-        ref = _center(self.box)[0]
-        xs = [_center(t.xyxy)[0] for t in order]
-        if step > 0:
-            i = next((k for k, x in enumerate(xs) if x > ref), 0)
-        else:
-            i = next((k for k in reversed(range(len(xs))) if xs[k] < ref), len(xs) - 1)
-        return self._lock(order[i])
+        self.mode = SCENE
+        self.track_id, self.cls = None, None
+        self.box = self.scene.gate_box()
+        self._set(LOCKED)
+        return True
 
     def stop(self):
+        self.scene.stop()
+        self.mode = AI
         self.track_id = self.box = self.cls = None
         self._set(IDLE)
         return True
 
     # ---- per frame ------------------------------------------------------
-    def update(self, tracker, frame_id):
+    def update(self, tracker, frame_id, frame=None):
         if self.state == IDLE:
             return
         now = time.monotonic()
         if self.state == LOST:
             if now - self.state_since > self.lost_hold_s:
                 self.stop()
+            return
+        if self.mode == SCENE:
+            self._update_scene(frame, now)
             return
         active = [t for t in tracker.tracked if t.activated]
         hit = next((t for t in active if t.track_id == self.track_id), None)
@@ -124,6 +174,19 @@ class TargetLock:
         near = self._nearest(fresh, cx, cy, gate)
         if near:
             self._lock(near)
+        elif now - self.state_since > self.coast_s:
+            self._set(LOST)
+
+    def _update_scene(self, frame, now):
+        ok, box = self.scene.update(frame)
+        if ok:
+            self.box = box
+            if self.state != LOCKED:
+                self._set(LOCKED)
+        elif self.state == LOCKED:
+            # CSRT has no Kalman prediction to coast on: hold the last box and give the
+            # patch coast_s to come back (a brief occlusion or a motion blur burst).
+            self._set(COAST)
         elif now - self.state_since > self.coast_s:
             self._set(LOST)
 
