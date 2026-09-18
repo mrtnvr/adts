@@ -262,3 +262,33 @@ tespit, `o`/`r` = overlay/reticle, `l` = dil, `c` = renk, `q` = cikis.
 
 Against ArduPilot SITL instead of the fake GCS, point `--mav` at a SITL output port
 (e.g. `udpin:0.0.0.0:14555` with `--out=udp:127.0.0.1:14555` on `sim_vehicle.py`).
+
+## Testing over a real UART-TTL USB adapter, no drone
+
+For a benchtop test where ADTS runs on the Pi/Jetson and the "GCS" is your own PC talking
+over an actual USB-serial adapter instead of a network link: wire the adapter's TX/RX/GND
+to the board's UART header (crossed: adapter TX → board RX), then on the ADTS side use the
+serial device instead of a udpin URL:
+
+```bash
+python3 -m adts --source videos/ankara_drone_test.mp4 \
+    --model weights/waldo/WALDO30_yolov8m_640x640.pt --mav /dev/ttyUSB0 --window
+```
+
+On the PC, either drive it from the terminal with `tools/gcs_sim.py` (same commands as
+above, just a serial device instead of a udpout URL: `python3 tools/gcs_sim.py
+/dev/ttyUSB0` on Linux/macOS, `python3 tools/gcs_sim.py COM3` on Windows), or use the
+point-and-click panel:
+
+```bash
+pip install pyserial   # only needed for the port dropdown; the field also takes typed input
+python3 tools/gcs_gui.py
+```
+
+Pick the adapter's port (refresh with the ⟳ button) and the FC's baud rate, Connect, and
+every button sends the same MAV_CMD_USER_* command tools/gcs_sim.py does - one button per
+row in the MAVLink command table above, plus a small canvas for TRACK_POINT (click) and
+TRACK_RECTANGLE (drag). The log at the bottom shows every ACK and the live LOCKED/COAST/
+LOST state with its AZ/EL readout. `tools/gcs_link.py` is the connection code both tools
+share; needs tkinter (bundled with python.org's Windows/macOS installers, `sudo apt
+install python3-tk` on Linux).
