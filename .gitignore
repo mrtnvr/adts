@@ -10,3 +10,8 @@ outputs/predictions/argus_test_frame27_0.jpg
 # regenerable TensorRT export artifacts (see export_trt.py) - large, rebuild locally instead
 weights/*.onnx
 weights/*.engine
+
+# Hailo export artifacts (export_hailo.py): regenerable, and the .hef is compiled on the x86 PC
+calib/
+models/*.onnx
+models/*.hef

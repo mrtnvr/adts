@@ -1,0 +1,4 @@
+# pip part of the Pi environment. Everything else comes from apt (deploy/pi_setup.sh):
+# hailo-all (hailo_platform), python3-picamera2, python3-opencv, python3-numpy, python3-scipy.
+# Don't pip-install numpy/opencv on the Pi: that would replace the apt builds picamera2 is linked against.
+pymavlink>=2.4.40
