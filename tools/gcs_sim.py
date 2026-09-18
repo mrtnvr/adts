@@ -7,7 +7,15 @@ tracking status that come back.
     python3 tools/gcs_sim.py udpout:127.0.0.1:14555       # this connects
 
 Interactive commands:
-    auto | point X Y | rect X1 Y1 X2 Y2 (normalised 0..1) | next | prev | select ID | stop | info | quit
+    yapay zeka takip : next | prev | engage | select ID | auto | cancel | ai on|off|toggle
+    sabit sahne takip: scene | scene stop | gate s|m|l|next
+    overlay          : overlay on|off|toggle | reticle on|off|toggle | lang tr|en|next
+                       color green|blue|red|white|black|next
+    dogrudan         : point X Y | rect X1 Y1 X2 Y2 (normalised 0..1) | stop | info | quit
+
+next/prev only MOVE the highlight between the five detections nearest the crosshair;
+engage is what actually starts tracking the highlighted one.
+
 Or run a script:  --script "auto; wait 3; next; wait 2; stop"
 """
 
@@ -23,6 +31,11 @@ from pymavlink import mavutil  # noqa: E402
 
 M = mavutil.mavlink
 CAM = M.MAV_COMP_ID_CAMERA
+
+ONOFF = {"off": 0, "on": 1, "toggle": -1}
+GATES = {"s": 0, "m": 1, "l": 2, "next": -1}
+LANGS = {"tr": 0, "en": 1, "next": -1}
+COLORS = {"green": 0, "blue": 1, "red": 2, "white": 3, "black": 4, "next": -1}
 
 
 def main():
@@ -76,26 +89,64 @@ def main():
         parts = line.split()
         if not parts:
             return True
-        op, a = parts[0], [float(x) for x in parts[1:]]
+        op, rest = parts[0], parts[1:]
         print(f"> {line}")
+
+        def nums():
+            return [float(x) for x in rest]
+
+        def pick(table):
+            key = rest[0].lower() if rest else "next"
+            if key not in table:
+                print(f"  bad argument: {rest[0]}")
+                return None
+            return table[key]
+
         if op == "auto":
             cmd(M.MAV_CMD_USER_1, 2)
         elif op == "point":
+            a = nums()
             cmd(M.MAV_CMD_CAMERA_TRACK_POINT, a[0], a[1], 0.02)
         elif op == "rect":
-            cmd(M.MAV_CMD_CAMERA_TRACK_RECTANGLE, *a[:4])
+            cmd(M.MAV_CMD_CAMERA_TRACK_RECTANGLE, *nums()[:4])
         elif op == "next":
             cmd(M.MAV_CMD_USER_1, 1)
         elif op == "prev":
             cmd(M.MAV_CMD_USER_1, -1)
         elif op == "select":
-            cmd(M.MAV_CMD_USER_1, 0, a[0])
+            cmd(M.MAV_CMD_USER_1, 0, nums()[0])
+        elif op == "engage":
+            cmd(M.MAV_CMD_USER_1, 3)
+        elif op == "cancel":
+            cmd(M.MAV_CMD_USER_1, 4)
+        elif op == "ai":
+            v = pick(ONOFF)
+            if v is not None:
+                cmd(M.MAV_CMD_USER_1, 5, v)
+        elif op == "scene":
+            cmd(M.MAV_CMD_USER_2, 0 if rest and rest[0] == "stop" else 1)
+        elif op == "gate":
+            v = pick(GATES)
+            if v is not None:
+                cmd(M.MAV_CMD_USER_2, 2, v)
+        elif op in ("overlay", "reticle"):
+            v = pick(ONOFF)
+            if v is not None:
+                cmd(M.MAV_CMD_USER_3, 1 if op == "overlay" else 2, v)
+        elif op == "lang":
+            v = pick(LANGS)
+            if v is not None:
+                cmd(M.MAV_CMD_USER_3, 3, v)
+        elif op == "color":
+            v = pick(COLORS)
+            if v is not None:
+                cmd(M.MAV_CMD_USER_3, 4, v)
         elif op == "stop":
             cmd(M.MAV_CMD_CAMERA_STOP_TRACKING)
         elif op == "info":
             cmd(M.MAV_CMD_REQUEST_MESSAGE, M.MAVLINK_MSG_ID_CAMERA_INFORMATION)
         elif op == "wait":
-            time.sleep(a[0])
+            time.sleep(nums()[0])
         elif op == "quit":
             return False
         else:

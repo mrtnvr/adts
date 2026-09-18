@@ -89,10 +89,23 @@ class GstSink:
             self.proc.kill()
 
 
+# Every operator command has a key here, so the whole MAVLink command set can be exercised
+# on the dev machine without a GCS. Enter arrives as 13 or 10 depending on the platform.
+KEYS = {
+    ord("s"): ("auto", None), ord("x"): ("stop", None),
+    ord("n"): ("cand", 1), ord("p"): ("cand", -1),
+    13: ("engage", None), 10: ("engage", None),
+    ord("g"): ("scene_start", None), ord("b"): ("scene_stop", None), ord("k"): ("gate", -1),
+    ord("d"): ("ai", -1), ord("o"): ("overlay", -1), ord("r"): ("reticle", -1),
+    ord("l"): ("lang", -1), ord("c"): ("color", -1),
+}
+KEY_HELP = ("click=track, n/p=sel, Enter=engage, s=auto, x=stop, g/b=scene on/off, k=gate, "
+            "d=AI, o/r=overlay/reticle, l=lang, c=color, q=quit")
+
+
 class WindowSink:
     """Dev-only cv2 window. Keys and the mouse become the same commands MAVLink sends:
-    left-click = track point, right-click / x = stop, s = auto (nearest crosshair),
-    n / p = next / prev target, q / Esc = quit."""
+    left-click = track point, right-click = stop, and KEYS above for the rest."""
 
     def __init__(self, title, on_command):
         self.title, self.on_command = title, on_command
@@ -109,11 +122,10 @@ class WindowSink:
     def submit(self, frame):
         cv2.imshow(self.title, frame)
         key = cv2.waitKey(1) & 0xFF
-        actions = {ord("s"): ("auto", None), ord("x"): ("stop", None), ord("n"): ("cycle", 1), ord("p"): ("cycle", -1)}
         if key in (ord("q"), 27):
             self.quit = True
-        elif key in actions:
-            self.on_command(*actions[key])
+        elif key in KEYS:
+            self.on_command(*KEYS[key])
 
     def close(self):
         cv2.destroyWindow(self.title)

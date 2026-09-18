@@ -19,9 +19,10 @@ import time
 from pathlib import Path
 
 from .bytetrack import ByteTracker
-from .classes import display_names
+from .commands import Controller
 from .detector import make_detector
-from .render import draw
+from .render import COLOR_NAMES, OverlayConfig, draw
+from .scene_track import GATE_SIZES
 from .target import TargetLock
 
 
@@ -47,7 +48,11 @@ def main():
     ap.add_argument("--imgsz", type=int, default=640, help="model input for Ultralytics models (a .hef has its own)")
     ap.add_argument("--conf", type=float, default=0.1, help="detector floor; ByteTrack uses 0.1-0.25 as its low-score band")
     ap.add_argument("--exclude-classes", default="UPole", help="comma-separated WALDO class names to drop")
-    ap.add_argument("--lang", choices=("tr", "en"), default="tr", help="class label language on the video")
+    ap.add_argument("--lang", choices=("tr", "en"), default="tr", help="starting overlay language (changeable in flight)")
+    ap.add_argument("--overlay-color", choices=COLOR_NAMES, default="green",
+                    help="starting symbology colour (changeable in flight)")
+    ap.add_argument("--gate", choices=[g.lower() for g in GATE_SIZES], default="m",
+                    help="starting scene-track gate size (changeable in flight)")
     ap.add_argument("--hfov", type=float, default=66.0,
                     help="camera horizontal FOV, degrees (Camera Module 3 = 66, CM3 Wide = 102); used for the angle error")
     ap.add_argument("--vfov", type=float, default=None, help="vertical FOV; derived from --hfov and aspect if omitted")
@@ -67,7 +72,6 @@ def main():
     args = ap.parse_args()
 
     detector = make_detector(args.model, imgsz=args.imgsz, conf=args.conf, exclude=args.exclude_classes.split(","))
-    names = display_names(detector.names, args.lang)
 
     if args.source == "picam":
         from .camera import PiCameraSource
@@ -77,7 +81,9 @@ def main():
         cam = VideoSource(args.source, args.size, realtime=not args.no_realtime, loop=args.loop)
 
     tracker = ByteTracker(buffer_frames=max(30, args.fps))
-    lock = TargetLock(args.size, args.hfov, args.vfov, coast_s=args.coast)
+    lock = TargetLock(args.size, args.hfov, args.vfov, coast_s=args.coast, gate=args.gate.upper())
+    overlay = OverlayConfig(lang=args.lang, color_idx=COLOR_NAMES.index(args.overlay_color))
+    ctl = Controller(lock, tracker, overlay, detector.names)
 
     local_cmds = queue.Queue()
     mav = None
@@ -102,25 +108,9 @@ def main():
         print(f"video out: hdmi={args.hdmi} udp={args.udp} record={rec_path}")
     window = None
     if args.window:
-        from .video_out import WindowSink
-        window = WindowSink("ADTS - click=track, s=auto, n/p=next/prev, x=stop, q=quit",
-                            lambda kind, arg: local_cmds.put((kind, arg, None)))
+        from .video_out import WindowSink, KEY_HELP
+        window = WindowSink(f"ADTS - {KEY_HELP}", lambda kind, arg: local_cmds.put((kind, arg, None)))
         sinks.append(window)
-
-    def run_command(kind, arg, tracks):
-        if kind == "point":
-            return lock.start_point(arg[0], arg[1], tracks)
-        if kind == "rect":
-            return lock.start_rect(arg, tracks)
-        if kind == "auto":
-            return lock.start_auto(tracks)
-        if kind == "cycle":
-            return lock.cycle(arg, tracks)
-        if kind == "select":
-            return lock.select_id(arg, tracks)
-        if kind == "stop":
-            return lock.stop()
-        return False
 
     seq, frame_idx = 0, 0
     tracks = []
@@ -140,7 +130,11 @@ def main():
             frame = frame.copy()  # the camera thread may reuse its buffer; drawing needs our own
 
             t0 = time.monotonic()
-            if frame_idx % args.detect_stride == 0:
+            if not ctl.ai_on:
+                # Detection switched off: the Hailo (or the GPU) stays idle, and nothing is
+                # drawn but the scene track, if one is running.
+                t1, tracks, det_ms = t0, [], 0.0
+            elif frame_idx % args.detect_stride == 0:
                 dets = detector(frame)
                 t1 = time.monotonic()
                 tracks = tracker.update(dets)
@@ -150,8 +144,10 @@ def main():
                 tracks = tracker.predict_only()
             t2 = time.monotonic()
             frame_idx += 1
+            lock.refresh_candidates(tracks)
 
-            # Commands run after tracking so they act on the tracks the operator sees now.
+            # Commands run after tracking so they act on the tracks the operator sees now, and
+            # BEFORE draw() so a scene track starts on a clean frame, not on our own symbology.
             while True:
                 try:
                     kind, arg, mc = local_cmds.get_nowait()
@@ -163,12 +159,12 @@ def main():
                     except queue.Empty:
                         break
                     kind, arg = mc.kind, mc.arg
-                ok = run_command(kind, arg, tracks)
+                ok = ctl.run(kind, arg, tracks, frame)
                 print(f"command {kind} {arg if arg is not None else ''} -> {'OK' if ok else 'FAILED'} ({lock.state} {lock.track_id})")
                 if mc is not None:
                     mc.done(ok)
 
-            lock.update(tracker, tracker.frame_id)
+            lock.update(tracker, tracker.frame_id, frame)
             if mav is not None:
                 mav.set_status(lock.state, lock.normalized_box(), lock.angle_error())
 
@@ -177,9 +173,9 @@ def main():
             ema_fps = (1 / dt if ema_fps == 0 else 0.9 * ema_fps + 0.1 / dt) if dt > 0 else ema_fps
             if now - t_temp > 2:
                 temp, t_temp = cpu_temp(), now
-            draw(frame, tracks, lock, names, {
-                "fps": ema_fps, "det_ms": det_ms, "temp_c": temp,
-                "mav": mav.connected if mav else None, "rec": rec_path is not None})
+            draw(frame, tracks, lock, ctl.names, {
+                "fps": ema_fps, "det_ms": det_ms, "temp_c": temp, "ai": ctl.ai_on,
+                "mav": mav.connected if mav else None, "rec": rec_path is not None}, overlay)
             t3 = time.monotonic()
             for s in sinks:
                 s.submit(frame)

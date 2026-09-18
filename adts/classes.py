@@ -25,6 +25,21 @@ WALDO_NAMES_TR = {
     "Bus": "Otobus",
 }
 
+# Fixed symbology labels, switched by the same "dil degistir" command as the class names.
+# ASCII only, for the same reason as WALDO_NAMES_TR.
+UI_TEXT = {
+    "en": {"IDLE": "IDLE", "LOCKED": "LOCKED", "COAST": "COAST", "LOST": "LOST",
+           "ai_mode": "AI TRACK", "scene_mode": "SCENE TRACK", "ai": "AI", "on": "ON", "off": "OFF",
+           "det": "DET", "tgt": "TGT", "sel": "SEL", "gate": "GATE", "scene": "SCENE"},
+    "tr": {"IDLE": "BOSTA", "LOCKED": "KILITLI", "COAST": "TAHMIN", "LOST": "KAYIP",
+           "ai_mode": "YZ TAKIP", "scene_mode": "SAHNE TAKIP", "ai": "YZ", "on": "ACIK", "off": "KAPALI",
+           "det": "TESPIT", "tgt": "HEDEF", "sel": "SECILI", "gate": "KAPI", "scene": "SAHNE"},
+}
+
 
 def display_names(names, lang):
     return [WALDO_NAMES_TR.get(n, n) for n in names] if lang == "tr" else list(names)
+
+
+def ui_text(lang):
+    return UI_TEXT.get(lang, UI_TEXT["en"])

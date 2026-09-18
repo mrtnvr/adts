@@ -18,8 +18,10 @@ Code layout (`adts/`):
 | `camera.py` | `PiCameraSource` (CSI) / `VideoSource` (files, dev). Newest frame only, never queues |
 | `detector.py` | `HailoDetector` (.hef) / `UltralyticsDetector` (.pt/.onnx/.engine, dev) |
 | `bytetrack.py` | ByteTrack in numpy + scipy (no torch on the Pi) |
-| `target.py` | IDLE → LOCKED → COAST → LOST state machine; angle error from the camera FOV |
-| `render.py` | symbology: crosshair, target brackets, state, AZ/EL, FPS, temperature, MAV link |
+| `target.py` | IDLE → LOCKED → COAST → LOST state machine in two modes (AI / scene); candidate selection; angle error from the camera FOV |
+| `scene_track.py` | sabit sahne/obje takip: OpenCV CSRT locked on the centre gate (S/M/L), no detector |
+| `commands.py` | where every operator command is executed, whatever carried it (MAVLink or dev keys) |
+| `render.py` | symbology: crosshair, gate, candidates, target brackets, state, AZ/EL, FPS, temperature, MAV link. On/off, language and colour switch in flight |
 | `video_out.py` | `GstSink` (HDMI kmssink / x264 RTP / MPEG-TS recording), `WindowSink` (dev) |
 | `mavlink_io.py` | MAVLink camera component: tracking commands in, tracking status + angle error out |
 
@@ -168,10 +170,45 @@ back the same way.
 | `MAV_CMD_CAMERA_TRACK_POINT` (2004) | p1=x, p2=y (0..1) | lock the detection at/near that point |
 | `MAV_CMD_CAMERA_TRACK_RECTANGLE` (2005) | p1..p4 = x1,y1,x2,y2 (0..1) | lock the detection that best overlaps the rectangle |
 | `MAV_CMD_CAMERA_STOP_TRACKING` (2010) | – | stop |
-| `MAV_CMD_USER_1` (31010) | p1=+1 / -1 | next / previous target (left to right) |
-| | p1=2 | auto: detection nearest the crosshair |
-| | p1=0, p2=ID | select track ID (shown on the video) |
 | `MAV_CMD_REQUEST_MESSAGE` (512) | p1=259 | replies with CAMERA_INFORMATION (advertises tracking support) |
+
+**Yapay zeka takip** — `MAV_CMD_USER_1` (31010). Selecting and engaging are separate steps:
+`±1` only moves the highlight between the five detections nearest the crosshair, and `p1=3`
+is what starts tracking the highlighted one.
+
+| Params | Action |
+|---|---|
+| p1=+1 / -1 | secili hedef ILERI / GERI (highlight only, left-to-right order) |
+| p1=0, p2=ID | highlight that track ID (only the current five are selectable) |
+| p1=2 | auto: highlight and lock the detection nearest the crosshair, in one step |
+| p1=3 | secili hedef takip BASLAT |
+| p1=4 | takip IPTAL |
+| p1=5, p2 | yapay zeka tespit: 0 kapali, 1 acik, -1 degistir. Off leaves the Hailo idle and drops any AI lock; a scene track keeps running |
+
+**Sabit sahne/obje takip** — `MAV_CMD_USER_2` (31011). CSRT on the gate contents, so the
+target doesn't have to be one of WALDO's 12 classes, and it works with detection switched off.
+
+| Params | Action |
+|---|---|
+| p1=1 | takip BASLAT: lock whatever is inside the gate |
+| p1=0 | takip IPTAL (refused with FAILED if no scene track is running) |
+| p1=2, p2 | kapi boyutu: 0=S, 1=M, 2=L, -1 = next. The gate is drawn at the centre whenever nothing is being tracked |
+
+**Overlay** — `MAV_CMD_USER_3` (31012). All four take effect on the next frame, on HDMI,
+UDP and the recording alike.
+
+| Params | Action |
+|---|---|
+| p1=1, p2 | overlay: 0 kapali (clean image), 1 acik, -1 degistir |
+| p1=2, p2 | reticle: 0 kapali, 1 acik, -1 degistir |
+| p1=3, p2 | dil: 0=tr, 1=en, -1 degistir |
+| p1=4, p2 | renk: 0=yesil, 1=mavi, 2=kirmizi, 3=beyaz, 4=siyah, -1 = next |
+
+Two parameter conventions run through all three: an on/off setting takes `0` / `1` / `-1`
+(toggle), and a multi-value setting takes an index or `-1` for the next value round, so a GCS
+with one button per function can still reach every value. COAST and LOST keep their amber and
+red whatever colour is picked — a slipping lock must not be something a colour preference can
+hide.
 
 Each command gets a `COMMAND_ACK`: `ACCEPTED`, or `FAILED` (e.g. nothing detected at that point).
 
@@ -207,11 +244,21 @@ journalctl -u adts -f                # live log
 # tracker on a video, MAVLink over UDP, window with keyboard/mouse control
 python3 -m adts --source videos/ankara_drone_test.mp4 \
     --model weights/waldo/WALDO30_yolov8m_640x640.pt --mav udpin:0.0.0.0:14555 --window
-# fake GCS: interactive (auto / next / prev / select ID / point X Y / stop / info)
+# fake GCS, interactive: next|prev|engage|select ID|auto|cancel|ai on|off, scene|scene stop|
+#   gate s|m|l, overlay|reticle on|off|toggle, lang tr|en, color green|blue|red|white|black,
+#   point X Y|rect X1 Y1 X2 Y2|stop|info
 python3 tools/gcs_sim.py udpout:127.0.0.1:14555
-# unit tests (tracker, lock state machine, Hailo output parsing)
+# ...or scripted, for a quick pass over the whole command set:
+python3 tools/gcs_sim.py udpout:127.0.0.1:14555 --script \
+    "next; wait 1; engage; wait 2; cancel; scene; wait 2; gate l; scene stop; ai off; wait 1; ai on"
+# unit tests (tracker, both lock modes, command decoding, symbology, Hailo output parsing)
 python3 -m pytest tests/ -q
 ```
+
+`--window` gives every command a key, so the whole set can be driven without a GCS:
+click = track point, `n`/`p` = secili hedef ileri/geri, `Enter` = takip baslat, `s` = auto,
+`x` = takip iptal, `g`/`b` = sahne takip baslat/iptal, `k` = kapi boyutu, `d` = yapay zeka
+tespit, `o`/`r` = overlay/reticle, `l` = dil, `c` = renk, `q` = cikis.
 
 Against ArduPilot SITL instead of the fake GCS, point `--mav` at a SITL output port
 (e.g. `udpin:0.0.0.0:14555` with `--out=udp:127.0.0.1:14555` on `sim_vehicle.py`).
